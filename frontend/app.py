@@ -1,169 +1,139 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import time
-import plotly.express as px
+import os
 
-# --- PAGE CONFIG ---
-st.set_page_config(page_title="BunchGuard Dashboard", page_icon="🚍", layout="wide")
+# -------------------------------
+# LOAD DATA
+# -------------------------------
+file_path = os.path.join("..", "data", "expanded_bmtc_dataset.csv")
+df = pd.read_csv(file_path)
 
-# --- CSS STYLING ---
-st.markdown("""
-<style>
-    .reportview-container { background: #f0f2f6; }
-    .big-font { font-size:20px !important; font-weight: bold; }
-    .stAlert { padding: 10px; }
-</style>
-""", unsafe_allow_html=True)
+st.set_page_config(layout="wide")
+st.title("🚍 Dynamic Bus Scheduling Dashboard")
 
-# --- SIMULATED DATASET GENERATION ---
-def get_simulation_data():
-    np.random.seed(int(time.time()))
-    data = {
-        'bus_id': ['B1', 'B2', 'B3', 'B4', 'B5'],
-        'stop_name': ['Central Stn', 'Oak St', 'Main Ave', 'High Park', 'Terminal'],
-        'arrival_time': ['10:00', '10:05', '10:12', '10:20', '10:30'],
-        'headway': [6, 2, 8, 3, 5], # Minutes between buses
-        'headway_change_rate': [0.1, -0.5, 0.2, -0.8, 0.0], # Negative = closing gap
-        'passengers': [45, 95, 30, 110, 50],
-        'demand_level': ['Medium', 'High', 'Low', 'High', 'Medium'],
-        'bunching_label': [0, 1, 0, 2, 0], # 0=Safe, 1=Risk, 2=Bunching
-        'traffic_delay': [2, 5, 1, 8, 2]
-    }
-    df = pd.DataFrame(data)
-    # Map bunching labels to colors
-    df['status_color'] = df['bunching_label'].map({0: '🟢 Safe', 1: '🟡 Risk', 2: '🔴 Bunching'})
-    return df
+# -------------------------------
+# SMART DECISION HANDLING
+# -------------------------------
+if "decision" not in df.columns:
+    
+    def temp_decision(row):
+        if row["headway"] < 3:
+            return "STOP_AT_NEXT_MAJOR_STOP"
+        elif row["waiting_passengers"] > 30:
+            return "CROWDED_STOP_INFO"
+        else:
+            return "STABLE"
 
-# --- SESSION STATE FOR SIMULATION ---
-if 'df' not in st.session_state:
-    st.session_state.df = get_simulation_data()
+    df["decision"] = df.apply(temp_decision, axis=1)
+    df["hold_time"] = df["decision"].apply(lambda x: 120 if "STOP" in x else 0)
 
-# --- HEADER ---
-st.title("🚍 BunchGuard: Dynamic Bus Scheduling & Anti-Bunching System")
+    st.info("⚙️ Using temporary decision logic")
+
+else:
+    if "hold_time" not in df.columns:
+        df["hold_time"] = 120
+
+    st.success("✅ Using decision engine output")
+
+# -------------------------------
+# KPI SECTION
+# -------------------------------
+col1, col2, col3, col4 = st.columns(4)
+
+col1.metric("🚍 Total Buses", df["bus_id"].nunique())
+col2.metric("⚠️ Bunching Alerts", df[df["decision"].str.contains("STOP")].shape[0])
+col3.metric("👥 Crowded Stops", df[df["decision"] == "CROWDED_STOP_INFO"].shape[0])
+col4.metric("⏱ Avg Waiting Passengers", round(df["waiting_passengers"].mean(), 2))
+
 st.markdown("---")
 
-# --- SIDEBAR - CONTROLS ---
-st.sidebar.header("🎛️ Simulation Controls")
-if st.sidebar.button("Simulate Next Time Step"):
-    st.session_state.df = get_simulation_data()
-    st.rerun()
+# -------------------------------
+# 🚨 ALERT PANELS
+# -------------------------------
+st.markdown("## 🚨 System Alerts")
 
-traffic_level = st.sidebar.slider("Traffic Congestion Level", 0, 100, 50)
-bus_speed = st.sidebar.select_slider("Bus Frequency Setting", options=["Low", "Normal", "High"], value="Normal")
+bunching_df = df[df["decision"].str.contains("STOP")]
+crowd_df = df[df["decision"] == "CROWDED_STOP_INFO"]
+stable_df = df[df["decision"] == "STABLE"]
 
-# --- TABS ---
-tab1, tab2 = st.tabs(["👨‍💼 Admin Panel", "👥 Passenger Panel"])
+# -------------------------------
+# 🔴 BUNCHING PANEL
+# -------------------------------
+st.markdown("### 🔴 Bunching Alerts")
 
-# ==========================================
-# 👨‍💼 ADMIN PANEL
-# ==========================================
-with tab1:
-    st.header("Control System Monitor")
-    
-    # 1. LIVE MONITORING TABLE
-    st.subheader("Live Bus Operations")
-    
-    def color_status(val):
-        color = 'white'
-        if 'Bunching' in val: color = '#ffcccc' # Light Red
-        elif 'Risk' in val: color = '#fff3cd' # Light Yellow
-        elif 'Safe' in val: color = '#d4edda' # Light Green
-        return f'background-color: {color}'
+if bunching_df.empty:
+    st.success("✅ No bunching detected")
+else:
+    for _, row in bunching_df.head(10).iterrows():
+        st.error(f"""
+🚨 **Bus {row['bus_id']} → {row['stop_name']}**
 
-    styled_df = st.session_state.df[['bus_id', 'stop_name', 'headway', 'passengers', 'demand_level', 'status_color']]
-    st.dataframe(styled_df.style.applymap(color_status, subset=['status_color']), use_container_width=True)
+⚠️ Future Bunching Detected  
+📊 Headway: {round(row['headway'], 2)} min  
 
-    col1, col2, col3 = st.columns(3)
-    
-    # 2. EARLY WARNING PANEL
-    with col1:
-        st.subheader("⚠️ Early Warning System")
-        risky_buses = st.session_state.df[st.session_state.df['headway_change_rate'] < 0]
-        if not risky_buses.empty:
-            for _, row in risky_buses.iterrows():
-                st.warning(f"Bus {row['bus_id']} closing gap at {row['stop_name']}. Headway: {row['headway']} min")
-        else:
-            st.success("No bunching risk detected.")
+👉 **ACTION: STOP at major stop**  
+⏱ Hold Time: {row['hold_time']} sec  
 
-    # 3. AI DECISION & 4. INSERTION PANEL
-    with col2:
-        st.subheader("🤖 AI Action Panel")
-        for _, row in st.session_state.df.iterrows():
-            if row['headway'] <= 3 and row['demand_level'] == 'Low':
-                st.info(f"👉 Hold {row['bus_id']} at {row['stop_name']} for 30s (Low Demand)")
-            elif row['headway'] <= 3 and row['demand_level'] == 'High':
-                st.success(f"✅ {row['bus_id']} {row['stop_name']}: Maintain speed (High Demand)")
-            
-            if row['passengers'] > 100:
-                st.error(f"🚨 ALERT: Insert extra bus for {row['bus_id']} at {row['stop_name']}!")
+**Reason:**  
+- Headway Change: {round(row.get('headway_change_rate', 0), 2)}  
+- Congestion: {row.get('congestion_level', 'N/A')}
+""")
 
-    # 5. OVERTAKING & 6. DYNAMIC SCHEDULING
-    with col3:
-        st.subheader("📊 Dynamic Scheduling")
-        
-        # Overtaking Logic
-        for i in range(len(st.session_state.df)-1):
-            if st.session_state.df.iloc[i]['passengers'] > 90 and st.session_state.df.iloc[i+1]['passengers'] < 50:
-                st.warning(f"🔄 Allow Overtaking: {st.session_state.df.iloc[i+1]['bus_id']} to pass {st.session_state.df.iloc[i]['bus_id']}")
+# -------------------------------
+# 👥 CROWD PANEL
+# -------------------------------
+st.markdown("### 👥 Crowded Stops")
 
-        # Scheduling Logic
-        if bus_speed == "High":
-            st.metric("Frequency", "10 buses/hour", "+40%")
-        elif bus_speed == "Low":
-            st.metric("Frequency", "4 buses/hour", "-20%")
-        else:
-            st.metric("Frequency", "7 buses/hour", "0%")
+if crowd_df.empty:
+    st.success("✅ No crowded stops")
+else:
+    for _, row in crowd_df.head(10).iterrows():
+        st.warning(f"""
+👥 **{row['stop_name']} Stop**
 
-    # 7. ANALYTICS
-    st.markdown("---")
-    st.subheader("📊 Performance Analytics")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Avg Waiting Time (System On)", "3.2 min", "-1.5 min")
-    c2.metric("Bunching Incidents", "1", "-2 vs yesterday")
-    c3.metric("Passenger Comfort Index", "85%", "+10%")
-    
-    # Simple chart
-    st.line_chart(st.session_state.df.set_index('bus_id')['headway'])
+👥 Waiting Passengers: {row['waiting_passengers']}  
 
-# ==========================================
-# 👥 PASSENGER PANEL
-# ==========================================
-with tab2:
-    st.header("Live Passenger Information")
-    
-    # 1. BUS ARRIVAL INFO
-    st.subheader("Next Bus Arrivals")
-    
-    for _, row in st.session_state.df.head(3).iterrows():
-        with st.container():
-            col1, col2, col3 = st.columns([2, 2, 1])
-            col1.markdown(f"**Bus {row['bus_id']}** - {row['stop_name']}")
-            
-            # Load Status
-            if row['passengers'] > 90:
-                col2.markdown("🔴 **Crowded**")
-                advice = "Suggest: Wait for next bus"
-            elif row['passengers'] > 50:
-                col2.markdown("🟡 **Moderate**")
-                advice = "You can board"
-            else:
-                col2.markdown("🟢 **Comfortable**")
-                advice = "You can board"
-            
-            col3.markdown(f"Arrival: {np.random.randint(1,10)} min")
-            st.caption(f"Status: {advice}")
-            st.markdown("---")
+👉 STATUS: High Demand  
+👉 ACTION: No schedule change  
 
-    # 4. LIVE TRACKING (SIMULATED)
-    st.subheader("Live Map Simulation")
-    # Simulate bus positions
-    map_data = pd.DataFrame({
-        'lat': [37.77, 37.78, 37.79, 37.80],
-        'lon': [-122.41, -122.42, -122.43, -122.44],
-        'bus': ['B1', 'B2', 'B3', 'B4']
-    })
-    st.map(map_data)
+Suggestion: Monitor or deploy extra bus
+""")
 
-st.sidebar.markdown("---")
-st.sidebar.caption("BunchGuard AI - Hackathon Demo 2026")
+# -------------------------------
+# ✅ STABLE PANEL
+# -------------------------------
+st.markdown("### ✅ Stable Operations")
+
+if stable_df.empty:
+    st.warning("⚠️ No stable buses currently")
+else:
+    for _, row in stable_df.head(10).iterrows():
+        st.success(f"""
+✅ **Bus {row['bus_id']} → {row['stop_name']}**
+
+System Stable  
+
+📊 Headway: {round(row['headway'], 2)} min  
+👥 Waiting Passengers: {row['waiting_passengers']}  
+
+👉 ACTION: Maintain current schedule
+""")
+
+st.markdown("---")
+
+# -------------------------------
+# 📊 CHARTS SECTION
+# -------------------------------
+col1, col2 = st.columns(2)
+
+# Passenger Demand Chart
+with col1:
+    st.subheader("📊 Passenger Demand by Stop")
+    demand_df = df.groupby("stop_name")["waiting_passengers"].mean().reset_index()
+    st.bar_chart(demand_df.set_index("stop_name"))
+
+# Headway Graph
+with col2:
+    st.subheader("📈 Headway Trend")
+    st.line_chart(df["headway"])
